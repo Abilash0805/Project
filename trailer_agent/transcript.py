@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class Word:
+    start: float
+    end: float
+    text: str
 
 
 @dataclass
@@ -13,10 +20,12 @@ class SpeechSegment:
     start: float
     end: float
     text: str
+    words: list[Word] = field(default_factory=list)
 
 
 def transcribe(path: str, *, model_size: str = "base") -> list[SpeechSegment] | None:
-    """Return speech segments, or None when faster-whisper isn't installed."""
+    """Return speech segments (with word timestamps), or None when
+    faster-whisper isn't installed."""
     try:
         from faster_whisper import WhisperModel  # type: ignore[import-not-found]
     except ImportError:
@@ -26,9 +35,17 @@ def transcribe(path: str, *, model_size: str = "base") -> list[SpeechSegment] | 
 
     try:
         model = WhisperModel(model_size, compute_type="int8")
-        segments, _info = model.transcribe(path, vad_filter=True)
+        segments, _info = model.transcribe(path, vad_filter=True, word_timestamps=True)
         return [
-            SpeechSegment(start=s.start, end=s.end, text=s.text.strip())
+            SpeechSegment(
+                start=s.start,
+                end=s.end,
+                text=s.text.strip(),
+                words=[
+                    Word(start=w.start, end=w.end, text=w.word.strip())
+                    for w in (s.words or [])
+                ],
+            )
             for s in segments
             if s.text.strip()
         ]

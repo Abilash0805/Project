@@ -22,6 +22,7 @@ class VideoAnalysis:
     info: MediaInfo
     scenes: list[Scene]
     speech: list[SpeechRegion] = field(default_factory=list)
+    segments: list[SpeechSegment] = field(default_factory=list)  # full transcript
     fingerprints: Fingerprints | None = None
     has_transcript: bool = False
 
@@ -104,9 +105,11 @@ def analyze(
             scene.energy = 0.5
 
     has_transcript = False
+    segments: list[SpeechSegment] = []
     if with_transcript and info.has_audio:
-        segments = transcribe(path)
-        if segments:
+        transcribed = transcribe(path)
+        if transcribed:
+            segments = transcribed
             _attach_transcript(scenes, segments)
             has_transcript = True
 
@@ -114,6 +117,7 @@ def analyze(
         info=info,
         scenes=scenes,
         speech=speech,
+        segments=segments,
         fingerprints=stats.fingerprints,
         has_transcript=has_transcript,
     )

@@ -19,6 +19,7 @@ from .analysis import VideoAnalysis
 from .audio import snap_to_speech
 from .config import TrailerOptions
 from .music import BeatGrid
+from .quotes import Quote, mine_quotes
 from .scenes import Scene
 from .storyboard import TimelineItem, TrailerPlan
 from .videostats import Fingerprints
@@ -167,6 +168,28 @@ class ProEditor:
     def black_gap(self, note: str) -> TimelineItem:
         return TimelineItem(kind="black", duration=round(self.gap_duration(), 3), note=note)
 
+    def cut_quote(self, quote: Quote, *, note: str) -> TimelineItem | None:
+        """Cut a shot exactly around a spoken line, padded so it lands on the grid.
+
+        Lead-in/out padding gives the line air; when a beat grid exists the tail
+        is extended (into free footage only) so the shot stays a beat multiple.
+        """
+        start = max(quote.start - 0.25, 0.0)
+        end = min(quote.end + 0.35, self.analysis.info.duration)
+        if end - start < 0.6:
+            return None
+        if not self.picker._is_free(start, end):
+            return None
+        if self.grid:
+            desired = self.grid.quantize(end - start)
+            padded_end = start + desired
+            if (padded_end <= self.analysis.info.duration
+                    and self.picker._is_free(start, padded_end)):
+                end = padded_end  # keep the grid; otherwise let the line breathe off-grid
+        self.picker.claim(start, end, Scene(start=start, end=end))
+        return TimelineItem(kind="shot", start=round(start, 3), end=round(end, 3),
+                            note=f"{note}: “{quote.text[:60]}”")
+
     # -- the cut ----------------------------------------------------------
 
     def plan(self) -> TrailerPlan:
@@ -174,31 +197,47 @@ class ProEditor:
         target = self.opts.target_duration
         scenes = self.scenes
         by_excitement = sorted(scenes, key=lambda s: s.excitement, reverse=True)
-        timeline: list[TimelineItem] = []
 
         budget = {act: frac * target for act, frac in ACT_BUDGET.items()}
+
+        # mine the transcript for the lines a pro would build the trailer around
+        quotes = mine_quotes(self.analysis.segments, 4) if self.analysis.segments else []
+        the_line = quotes[0] if quotes else None      # best line: saved for pre-title
+        setup_quotes = sorted(quotes[1:], key=lambda q: q.start)  # story order
+
+        opening: list[TimelineItem] = []
+        montage: list[TimelineItem] = []
+        closing: list[TimelineItem] = []
 
         # 1. HOOK — the single most arresting moment, slams in cold
         for scene in by_excitement:
             shot = self.cut_shot(scene, self.beats(3, budget["hook"]),
                                  note="hook: peak excitement")
             if shot:
-                timeline.append(shot)
+                opening.append(shot)
                 break
-        timeline.append(self.black_gap("dip after hook"))
+        opening.append(self.black_gap("dip after hook"))
 
-        # 2. SETUP — dialogue-first scenes from the first third, room to breathe
-        first_third = [s for s in scenes if s.end < duration / 3]
-        talkers = [s for s in first_third if s.has_speech or s.text]
-        calm = sorted(talkers or first_third, key=lambda s: s.excitement)
+        # 2. SETUP — built around quotable dialogue when a transcript exists,
+        #    else dialogue-flagged scenes from the first third
         n_setup = max(min(len(SETUP_PATTERN), int(budget["setup"] // 3)), 1)
-        for i, scene in enumerate(self.pick(calm, n_setup, min_gap=12.0)):
-            length = self.beats(SETUP_PATTERN[i % len(SETUP_PATTERN)],
-                                budget["setup"] / n_setup)
-            shot = self.cut_shot(scene, length, note=f"setup {i + 1}",
-                                 dialogue=bool(scene.has_speech or scene.text))
+        used_setup = 0
+        for quote in setup_quotes[:n_setup]:
+            shot = self.cut_quote(quote, note=f"setup {used_setup + 1}")
             if shot:
-                timeline.append(shot)
+                opening.append(shot)
+                used_setup += 1
+        if used_setup < n_setup:
+            first_third = [s for s in scenes if s.end < duration / 3]
+            talkers = [s for s in first_third if s.has_speech or s.text]
+            calm = sorted(talkers or first_third, key=lambda s: s.excitement)
+            for i, scene in enumerate(self.pick(calm, n_setup - used_setup, min_gap=12.0)):
+                length = self.beats(SETUP_PATTERN[i % len(SETUP_PATTERN)],
+                                    budget["setup"] / n_setup)
+                shot = self.cut_shot(scene, length, note=f"setup {used_setup + i + 1}",
+                                     dialogue=bool(scene.has_speech or scene.text))
+                if shot:
+                    opening.append(shot)
 
         # 3. BUILD — rising intensity across the middle of the film
         middle = [s for s in scenes if duration / 4 < s.start < duration * 0.85]
@@ -212,8 +251,8 @@ class ProEditor:
                                 budget["build"] / n_build)
             shot = self.cut_shot(scene, length, note=f"build {i + 1}")
             if shot:
-                timeline.append(shot)
-        timeline.append(self.black_gap("dip before montage"))
+                opening.append(shot)
+        opening.append(self.black_gap("dip before montage"))
 
         # 4. MONTAGE — rapid-fire peaks, accelerating to the climax
         n_montage = max(min(len(MONTAGE_PATTERN), int(budget["montage"] // 1.2)), 2)
@@ -225,41 +264,66 @@ class ProEditor:
                                  speed=1.0 if pattern > 1 else 1.15,
                                  note=f"montage {i + 1}")
             if shot:
-                timeline.append(shot)
+                montage.append(shot)
 
-        # 5. BREATH — the quiet beat before the title, slowed, fading to black
+        # 5. THE LINE — the best quote in the film, alone before the breath
+        if the_line:
+            shot = self.cut_quote(the_line, note="the line")
+            if shot:
+                closing.append(shot)
+
+        # 6. BREATH — the quiet beat before the title, slowed, fading to black
         quiet = sorted(scenes, key=lambda s: s.excitement)
         for scene in quiet:
             shot = self.cut_shot(scene, self.beats(4, budget["breath"]), speed=0.75,
                                  note="breath")
             if shot:
                 shot.fade_out = 0.5
-                timeline.append(shot)
+                closing.append(shot)
                 break
 
-        # 6. TITLE / TAGLINE
+        # 7. TITLE / TAGLINE
         if self.opts.title:
-            timeline.append(TimelineItem(
+            closing.append(TimelineItem(
                 kind="title", text=self.opts.title.upper(),
                 duration=round(self.beats(4, 2.6), 3), note="title"))
         if self.opts.tagline:
-            timeline.append(TimelineItem(
+            closing.append(TimelineItem(
                 kind="title", text=self.opts.tagline,
                 duration=round(self.beats(3, 2.0), 3), note="tagline"))
 
-        # 7. BUTTON — one last punch after the cards
+        # 8. BUTTON — one last punch after the cards
         for scene in by_excitement:
             shot = self.cut_shot(scene, self.beats(2, budget["button"]),
                                  note="button")
             if shot:
-                timeline.append(shot)
+                closing.append(shot)
                 break
 
+        # 9. FILL — a pro delivers the length that was asked for: keep adding
+        #    montage beats while the cut runs short and fresh footage remains
+        def total() -> float:
+            return sum(i.output_duration() for i in opening + montage + closing)
+
+        extra = 0
+        while total() < target * 0.92 and extra < 24:
+            candidates = self.pick(by_excitement, 1, min_gap=4.0)
+            if not candidates:
+                break
+            pattern = MONTAGE_PATTERN[(len(montage)) % len(MONTAGE_PATTERN)]
+            shot = self.cut_shot(candidates[0], self.beats(pattern, 1.2),
+                                 note=f"montage {len(montage) + 1}")
+            if not shot:
+                break
+            montage.append(shot)
+            extra += 1
+
         grid_note = f", beat-synced @ {self.grid.bpm:.0f} BPM" if self.grid else ""
+        quote_note = f", built around {len(quotes)} quotes" if quotes else ""
         return TrailerPlan(
             logline=f"Pro {self.opts.style.name} cut: excitement-driven, "
-                    f"speech-safe{grid_note}",
-            timeline=timeline,
+                    f"speech-safe{quote_note}{grid_note}",
+            timeline=opening + montage + closing,
         )
 
 
