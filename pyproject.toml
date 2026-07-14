@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trailer-agent"
+version = "0.1.0"
+description = "AI agent that turns a 15-20 minute video into a cinematic trailer"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.116.0",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+transcribe = ["faster-whisper>=1.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+trailer-agent = "trailer_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trailer_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

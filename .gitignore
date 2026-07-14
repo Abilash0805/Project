@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+*.mp4
+*.mov
+*.mkv
+!tests/fixtures/*.mp4
+plan.json
