@@ -29,7 +29,14 @@ class Scene:
     cut_score: float = 0.0    # how hard the cut into this scene was (visual change)
     energy: float = 0.0       # mean normalized loudness, filled in by analysis
     peak: float = 0.0         # peak normalized loudness
+    motion: float = 0.0       # mean normalized visual motion (frame difference)
+    has_speech: bool = False  # overlaps a detected speech region
     text: str = ""            # transcript overlapping this scene
+
+    @property
+    def excitement(self) -> float:
+        """Composite score a trailer editor would call 'intensity'."""
+        return 0.5 * self.energy + 0.35 * self.motion + 0.15 * self.peak
 
     @property
     def duration(self) -> float:

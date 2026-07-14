@@ -1,4 +1,4 @@
-"""Combine scene cuts, loudness, and transcript into one scored scene table."""
+"""Combine scene cuts, loudness, motion, and transcript into one scored scene table."""
 
 from __future__ import annotations
 
@@ -6,10 +6,11 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from .audio import EnergyCurve, analyze_energy
+from .audio import SpeechRegion, analyze_audio
 from .probe import MediaInfo, probe
-from .scenes import Scene, build_scenes, detect_cuts
+from .scenes import Scene, build_scenes
 from .transcript import SpeechSegment, transcribe
+from .videostats import Fingerprints, analyze_video
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ MAX_TEXT_PER_SCENE = 220  # keep the brain's context compact
 class VideoAnalysis:
     info: MediaInfo
     scenes: list[Scene]
+    speech: list[SpeechRegion] = field(default_factory=list)
+    fingerprints: Fingerprints | None = None
     has_transcript: bool = False
 
     def to_compact_json(self) -> str:
@@ -31,7 +34,9 @@ class VideoAnalysis:
                 "dur": round(s.duration, 2),
                 "energy": round(s.energy, 3),
                 "peak": round(s.peak, 3),
+                "motion": round(s.motion, 3),
                 "cut": round(s.cut_score, 3),
+                **({"speech": True} if s.has_speech else {}),
                 **({"text": s.text} if s.text else {}),
             }
             for i, s in enumerate(self.scenes)
@@ -47,12 +52,6 @@ class VideoAnalysis:
         )
 
 
-def _attach_energy(scenes: list[Scene], curve: EnergyCurve) -> None:
-    for scene in scenes:
-        scene.energy = curve.mean(scene.start, scene.end)
-        scene.peak = curve.peak(scene.start, scene.end)
-
-
 def _attach_transcript(scenes: list[Scene], segments: list[SpeechSegment]) -> None:
     for scene in scenes:
         parts: list[str] = []
@@ -66,6 +65,10 @@ def _attach_transcript(scenes: list[Scene], segments: list[SpeechSegment]) -> No
         scene.text = text
 
 
+def _overlaps_speech(scene: Scene, speech: list[SpeechRegion]) -> bool:
+    return any(r.start < scene.end and scene.start < r.end for r in speech)
+
+
 def analyze(
     path: str,
     *,
@@ -76,14 +79,22 @@ def analyze(
     log.info("Probed %s: %.1fs %dx%d @ %.2ffps", path, info.duration, info.width,
              info.height, info.fps)
 
-    cuts = detect_cuts(path, threshold=scene_threshold)
-    scenes = build_scenes(cuts, info.duration)
-    log.info("Detected %d cuts -> %d scenes", len(cuts), len(scenes))
+    stats = analyze_video(path, scene_threshold=scene_threshold)
+    scenes = build_scenes(stats.cuts, info.duration)
+    log.info("Detected %d cuts -> %d scenes", len(stats.cuts), len(scenes))
 
+    for scene in scenes:
+        scene.motion = stats.motion.mean(scene.start, scene.end)
+
+    speech: list[SpeechRegion] = []
     if info.has_audio:
         try:
-            curve = analyze_energy(path)
-            _attach_energy(scenes, curve)
+            audio = analyze_audio(path, info.duration)
+            speech = audio.speech
+            for scene in scenes:
+                scene.energy = audio.energy.mean(scene.start, scene.end)
+                scene.peak = audio.energy.peak(scene.start, scene.end)
+                scene.has_speech = _overlaps_speech(scene, speech)
         except Exception as exc:
             log.warning("Audio analysis failed (%s); using neutral energy", exc)
             for scene in scenes:
@@ -99,4 +110,10 @@ def analyze(
             _attach_transcript(scenes, segments)
             has_transcript = True
 
-    return VideoAnalysis(info=info, scenes=scenes, has_transcript=has_transcript)
+    return VideoAnalysis(
+        info=info,
+        scenes=scenes,
+        speech=speech,
+        fingerprints=stats.fingerprints,
+        has_transcript=has_transcript,
+    )

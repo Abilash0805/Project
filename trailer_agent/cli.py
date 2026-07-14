@@ -10,6 +10,7 @@ import sys
 from .analysis import analyze
 from .brain import make_plan
 from .config import DEFAULT_MODEL, STYLES, TrailerOptions
+from .music import BeatGrid, analyze_music
 from .render import render
 from .storyboard import TrailerPlan, validate_plan
 
@@ -25,7 +26,18 @@ def _build_options(args: argparse.Namespace) -> TrailerOptions:
         model=args.model,
         output_height=args.height,
         keep_temp=args.keep_temp,
+        sfx=not args.no_sfx,
     )
+
+
+def _music_grid(opts: TrailerOptions) -> BeatGrid | None:
+    """Detect the music's beat grid and remember its first-beat offset."""
+    if not opts.music:
+        return None
+    grid = analyze_music(opts.music)
+    if grid:
+        opts.music_offset = grid.first_beat
+    return grid
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -47,6 +59,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Scene-cut sensitivity 0-1; lower finds more cuts (default: 0.27)")
     p.add_argument("--height", type=int, default=1080, help="Output height (default: 1080)")
     p.add_argument("--keep-temp", action="store_true", help="Keep intermediate segment files")
+    p.add_argument("--no-sfx", action="store_true",
+                   help="Disable the synthesized riser + hit into the title card")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "plan":
         result = analyze(args.input, scene_threshold=args.scene_threshold,
                          with_transcript=not args.no_transcript)
-        plan = make_plan(result, opts)
+        plan = make_plan(result, opts, grid=_music_grid(opts))
         payload = plan.model_dump_json(indent=2)
         if args.output:
             with open(args.output, "w") as f:
@@ -102,25 +116,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "render":
-        result = analyze(args.input, scene_threshold=args.scene_threshold,
-                         with_transcript=False)
+        from .probe import probe
+
+        info = probe(args.input)
+        _music_grid(opts)  # sets opts.music_offset for beat-aligned music start
         with open(args.plan) as f:
             plan = TrailerPlan.model_validate(json.load(f))
-        plan = validate_plan(plan, result.info.duration, opts.target_duration)
-        out = render(plan, result.info, opts, args.output)
+        plan = validate_plan(plan, info.duration, opts.target_duration)
+        out = render(plan, info, opts, args.output)
         log.info("Trailer written to %s", out)
         return 0
 
     # make: full pipeline
     result = analyze(args.input, scene_threshold=args.scene_threshold,
                      with_transcript=not args.no_transcript)
-    plan = make_plan(result, opts)
+    plan = make_plan(result, opts, grid=_music_grid(opts))
     log.info("Plan: %s — %d items, %.1fs", plan.logline or "(untitled)",
              len(plan.timeline), plan.total_duration())
     for item in plan.timeline:
         if item.kind == "shot":
             log.info("  shot  %7.2f-%7.2fs x%.2g  %s", item.start, item.end,
                      item.speed, item.note)
+        elif item.kind == "black":
+            log.info("  black (%.2fs)  %s", item.duration or 0.3, item.note)
         else:
             log.info("  title %r (%.1fs)", item.text, item.duration or 2.0)
     out = render(plan, result.info, opts, args.output)

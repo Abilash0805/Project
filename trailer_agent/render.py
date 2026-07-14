@@ -2,8 +2,9 @@
 
 Strategy: every timeline item becomes a uniformly-encoded segment file
 (same codec/size/fps/audio layout), segments are concatenated losslessly,
-then a final pass adds music (side-chain ducked under the original audio),
-loudness normalization, and an end fade.
+then a final pass adds music (started on its first beat and side-chain
+ducked under the original audio), optional riser + hit sound design into
+the title card, loudness normalization, and an end fade.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 
 FPS = 30
 CINEMASCOPE = 2.39
+DECLICK = 0.03  # tiny audio fades at every cut so edits never click
 
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -77,22 +79,38 @@ def _letterbox_filter(width: int, height: int) -> str:
     )
 
 
-def _shot_filters(opts: TrailerOptions, speed: float) -> str:
+def _shot_filters(opts: TrailerOptions, item: TimelineItem) -> str:
     width, height = _frame_size(opts)
+    out_dur = item.output_duration()
     parts = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
         f"fps={FPS}",
     ]
-    if speed != 1.0:
-        parts.append(f"setpts=PTS/{speed:.6g}")
+    if item.speed != 1.0:
+        parts.append(f"setpts=PTS/{item.speed:.6g}")
     if opts.style.grade:
         parts.append(opts.style.grade)
     if opts.style.letterbox:
         lb = _letterbox_filter(width, height)
         if lb:
             parts.append(lb)
+    if item.fade_in > 0:
+        parts.append(f"fade=t=in:st=0:d={item.fade_in:.3f}")
+    if item.fade_out > 0:
+        parts.append(f"fade=t=out:st={max(out_dur - item.fade_out, 0):.3f}:d={item.fade_out:.3f}")
     parts.append("format=yuv420p")
+    return ",".join(parts)
+
+
+def _shot_audio_filters(item: TimelineItem) -> str:
+    out_dur = item.output_duration()
+    parts = []
+    if item.speed != 1.0:
+        parts.append(atempo_chain(item.speed))
+    # de-click: micro fades at both edges of every cut
+    parts.append(f"afade=t=in:st=0:d={DECLICK}")
+    parts.append(f"afade=t=out:st={max(out_dur - DECLICK, 0):.3f}:d={DECLICK}")
     return ",".join(parts)
 
 
@@ -108,14 +126,13 @@ def render_shot_segment(
 ) -> None:
     assert item.start is not None and item.end is not None
     span = item.end - item.start
-    vf = _shot_filters(opts, item.speed)
+    vf = _shot_filters(opts, item)
 
     args: list[str] = ["-ss", f"{item.start:.3f}", "-t", f"{span:.3f}", "-i", source]
     if has_audio:
-        af = atempo_chain(item.speed) if item.speed != 1.0 else "anull"
         args += [
             "-vf", vf,
-            "-af", af,
+            "-af", _shot_audio_filters(item),
             "-map", "0:v:0", "-map", "0:a:0",
         ]
     else:
@@ -130,27 +147,30 @@ def render_shot_segment(
     run_ffmpeg(args, timeout=1800)
 
 
-def render_title_segment(item: TimelineItem, opts: TrailerOptions, out_path: str) -> None:
+def render_card_segment(item: TimelineItem, opts: TrailerOptions, out_path: str) -> None:
+    """A title card, or a bare dip-to-black when the item has no text."""
     width, height = _frame_size(opts)
     duration = item.duration or 2.0
-    fade = min(opts.style.card_fade, duration / 3)
-    text = drawtext_escape(item.text or "")
-    font = find_font()
-    fontfile = f"fontfile={font}:" if font else ""
-    vf = (
-        f"drawtext={fontfile}text='{text}':fontcolor=white:"
-        f"fontsize={opts.style.card_font_size}:x=(w-text_w)/2:y=(h-text_h)/2:"
-        f"borderw=0,"
-        f"fade=t=in:st=0:d={fade:.3f},fade=t=out:st={duration - fade:.3f}:d={fade:.3f},"
-        f"format=yuv420p"
-    )
+    filters: list[str] = []
+    if item.kind == "title" and item.text:
+        fade = min(opts.style.card_fade, duration / 3)
+        text = drawtext_escape(item.text)
+        font = find_font()
+        fontfile = f"fontfile={font}:" if font else ""
+        filters.append(
+            f"drawtext={fontfile}text='{text}':fontcolor=white:"
+            f"fontsize={opts.style.card_font_size}:x=(w-text_w)/2:y=(h-text_h)/2"
+        )
+        filters.append(f"fade=t=in:st=0:d={fade:.3f}")
+        filters.append(f"fade=t=out:st={duration - fade:.3f}:d={fade:.3f}")
+    filters.append("format=yuv420p")
     run_ffmpeg(
         [
             "-f", "lavfi", "-t", f"{duration:.3f}",
             "-i", f"color=black:s={width}x{height}:r={FPS}",
             "-f", "lavfi", "-t", f"{duration:.3f}",
             "-i", "anullsrc=r=48000:cl=stereo",
-            "-vf", vf,
+            "-vf", ",".join(filters),
             "-map", "0:v:0", "-map", "1:a:0",
             "-shortest",
             *_ENCODE,
@@ -160,26 +180,109 @@ def render_title_segment(item: TimelineItem, opts: TrailerOptions, out_path: str
     )
 
 
-def _final_pass(assembled: str, total: float, opts: TrailerOptions, output: str) -> None:
+# -- sound design -----------------------------------------------------------
+
+def _title_start_time(plan: TrailerPlan) -> float | None:
+    """Trailer-time offset where the first title card begins."""
+    t = 0.0
+    for item in plan.timeline:
+        if item.kind == "title":
+            return t
+        t += item.output_duration()
+    return None
+
+
+def synth_riser(path: str, duration: float = 2.2) -> None:
+    """Pink-noise riser that swells into the title card."""
+    run_ffmpeg(
+        [
+            "-f", "lavfi", "-t", f"{duration:.3f}",
+            "-i", f"anoisesrc=color=pink:amplitude=0.45:r=48000",
+            "-af",
+            f"highpass=f=180,afade=t=in:st=0:d={duration - 0.15:.3f}:curve=exp,"
+            f"afade=t=out:st={duration - 0.12:.3f}:d=0.12",
+            "-ac", "2",
+            path,
+        ],
+        timeout=120,
+    )
+
+
+def synth_hit(path: str, duration: float = 1.6) -> None:
+    """Decaying sub-bass boom on the title reveal."""
+    run_ffmpeg(
+        [
+            "-f", "lavfi", "-t", f"{duration:.3f}",
+            "-i", f"aevalsrc=0.85*sin(2*PI*48*t)*exp(-4*t):s=48000",
+            "-af", f"afade=t=out:st={duration - 0.2:.3f}:d=0.2",
+            "-ac", "2",
+            path,
+        ],
+        timeout=120,
+    )
+
+
+def _final_pass(
+    assembled: str,
+    plan: TrailerPlan,
+    opts: TrailerOptions,
+    output: str,
+    workdir: str,
+) -> None:
+    total = plan.total_duration()
     fade_start = max(total - 1.2, 0.0)
     vf = f"fade=t=out:st={fade_start:.3f}:d=1.2"
 
-    if opts.music and os.path.exists(opts.music):
+    inputs: list[str] = ["-i", assembled]
+    filters: list[str] = []
+    mix_labels: list[str] = ["[0:a]"]
+    next_input = 1
+
+    has_music = bool(opts.music and os.path.exists(opts.music))
+    if has_music:
+        inputs += ["-i", opts.music]
         music_fade_out = max(total - 2.5, 0.0)
-        filter_complex = (
-            f"[1:a]aloop=loop=-1:size=2e9,atrim=0:{total:.3f},"
+        # start the track on its first detected beat so cuts land on the grid
+        offset = getattr(opts, "music_offset", 0.0) or 0.0
+        trim = f"atrim=start={offset:.3f},asetpts=PTS-STARTPTS," if offset > 0.01 else ""
+        filters.append(
+            f"[{next_input}:a]{trim}aloop=loop=-1:size=2e9,atrim=0:{total:.3f},"
             f"afade=t=in:st=0:d=1.0,afade=t=out:st={music_fade_out:.3f}:d=2.5,"
-            f"volume=0.9[music];"
-            # duck the music under the trailer's own audio (dialogue/impacts)
-            f"[music][0:a]sidechaincompress=threshold=0.06:ratio=8:attack=25:release=600[ducked];"
-            f"[0:a][ducked]amix=inputs=2:duration=first:normalize=0,"
-            f"loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+            f"volume=0.9[music]"
+        )
+        # duck the music under the trailer's own audio (dialogue/impacts)
+        filters.append(
+            "[music][0:a]sidechaincompress="
+            "threshold=0.06:ratio=8:attack=25:release=600[ducked]"
+        )
+        mix_labels.append("[ducked]")
+        next_input += 1
+
+    title_at = _title_start_time(plan)
+    if opts.sfx and title_at is not None and title_at > 0.5:
+        riser_path = os.path.join(workdir, "riser.wav")
+        hit_path = os.path.join(workdir, "hit.wav")
+        riser_len = min(2.2, title_at)
+        synth_riser(riser_path, riser_len)
+        synth_hit(hit_path)
+
+        riser_ms = int(max(title_at - riser_len, 0.0) * 1000)
+        hit_ms = int(title_at * 1000)
+        inputs += ["-i", riser_path, "-i", hit_path]
+        filters.append(f"[{next_input}:a]volume=0.5,adelay={riser_ms}|{riser_ms}[riser]")
+        filters.append(f"[{next_input + 1}:a]volume=0.8,adelay={hit_ms}|{hit_ms}[hit]")
+        mix_labels += ["[riser]", "[hit]"]
+        next_input += 2
+
+    if len(mix_labels) > 1:
+        filters.append(
+            f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:"
+            f"duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
         )
         run_ffmpeg(
             [
-                "-i", assembled,
-                "-i", opts.music,
-                "-filter_complex", filter_complex,
+                *inputs,
+                "-filter_complex", ";".join(filters),
                 "-map", "0:v:0", "-map", "[aout]",
                 "-vf", vf,
                 *_ENCODE,
@@ -190,7 +293,7 @@ def _final_pass(assembled: str, total: float, opts: TrailerOptions, output: str)
     else:
         run_ffmpeg(
             [
-                "-i", assembled,
+                *inputs,
                 "-vf", vf,
                 "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
                 *_ENCODE,
@@ -209,9 +312,9 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
         segments: list[str] = []
         for i, item in enumerate(plan.timeline):
             seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
-            if item.kind == "title":
-                log.info("Rendering title card %d: %r", i, item.text)
-                render_title_segment(item, opts, seg_path)
+            if item.kind in ("title", "black"):
+                log.info("Rendering %s card %d: %r", item.kind, i, item.text or "")
+                render_card_segment(item, opts, seg_path)
             else:
                 log.info(
                     "Rendering shot %d: %.2f-%.2fs x%.2g (%s)",
@@ -231,8 +334,8 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
             timeout=600,
         )
 
-        log.info("Final pass: mix, grade, loudness")
-        _final_pass(assembled, plan.total_duration(), opts, output)
+        log.info("Final pass: music, sound design, loudness")
+        _final_pass(assembled, plan, opts, output, workdir)
         return output
     finally:
         if opts.keep_temp:

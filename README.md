@@ -1,6 +1,7 @@
 # trailer-agent 🎬
 
-An AI agent that turns a **15–20 minute video** into a **next-level cinematic trailer**.
+An AI agent that turns a **15–20 minute video** into a **next-level cinematic trailer** —
+**no API key required**.
 
 Point it at a long video and it analyzes every scene, understands what's exciting,
 and cuts a trailer with real trailer grammar: a cold-open hook, a setup, a rising
@@ -8,30 +9,43 @@ build, an accelerating montage, a breath of silence, your title card, and a fina
 button shot.
 
 ```
-┌──────────┐   ┌─────────┐   ┌─────────┐   ┌────────────┐   ┌─────────┐   ┌────────┐
-│  probe    │→│  scenes  │→│  audio   │→│ transcript  │→│  brain   │→│ render  │
-│ (ffprobe) │  │ (cuts)   │  │ (energy) │  │ (optional)  │  │ (Claude) │  │ (ffmpeg)│
-└──────────┘   └─────────┘   └─────────┘   └────────────┘   └─────────┘   └────────┘
+┌──────────┐   ┌──────────────┐   ┌──────────────┐   ┌───────────┐   ┌────────┐
+│  probe    │→│ scene + motion │→│ loudness +    │→│ pro editor │→│ render  │
+│ (ffprobe) │  │ + fingerprints │  │ speech (1 pass)│  │ (offline)  │  │ (ffmpeg)│
+└──────────┘   └──────────────┘   └──────────────┘   └───────────┘   └────────┘
 ```
 
-## How it works
+## The built-in pro editor (default — works fully offline)
 
-1. **Probe** — reads duration, resolution, and fps with ffprobe.
-2. **Scene detection** — ffmpeg's scene-score filter finds every hard cut; slivers
-   are merged, marathon scenes are split.
-3. **Audio energy** — per-half-second loudness becomes an "excitement" curve; every
-   scene gets an energy and peak score.
-4. **Transcript (optional)** — if [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper)
-   is installed, dialogue is transcribed and attached to scenes, so the AI editor
-   can pick quotable lines.
-5. **The brain** — Claude (default: `claude-opus-4-8`) receives the compact scene
-   table and acts as a trailer editor: it picks moments, decides pacing and slow-mo,
-   writes title cards, and returns a structured, validated plan.
-   No API key? A built-in **heuristic editor** cuts a solid energy-driven trailer.
-6. **Render** — ffmpeg cuts each shot frame-accurately, applies a style grade and
-   cinematic 2.39:1 letterbox, renders fading title cards, concatenates everything,
-   side-chain-ducks your music under the dialogue, normalizes loudness to -14 LUFS,
-   and fades out.
+The editor cuts like a professional, using nothing but ffmpeg and pure Python:
+
+- **Beat-synced cutting** — give it a music track and it detects the BPM and beat
+  grid (onset-flux autocorrelation), then quantizes every cut so it lands on the
+  beat. The music itself starts on its first detected beat. Title card hits a downbeat.
+- **Excitement scoring** — every scene is scored on a composite of loudness,
+  visual motion (frame-difference analysis), and audio peaks. The hook and montage
+  come from the top of that curve; the setup and breath from the bottom.
+- **Speech-safe cuts** — silence detection finds phrase boundaries, and dialogue
+  shots snap to them so nobody ever gets cut off mid-word.
+- **No visual repetition** — 8×8 grayscale fingerprints of every second of footage
+  mean the editor avoids picking two shots that look alike (and never reuses a
+  single frame of footage).
+- **Real trailer rhythm** — act structure with designed, non-monotonic shot-length
+  patterns; the montage accelerates (2-beat → 1-beat flash cuts); dip-to-black
+  transitions land between acts, one beat long when music is present.
+- **Sound design** — a synthesized pink-noise riser swells into the title card and
+  a sub-bass hit lands on the reveal (`--no-sfx` to disable); micro-fades at every
+  cut so edits never click; music is side-chain ducked under dialogue; the final
+  mix is loudness-normalized to -14 LUFS.
+
+## Optional: Claude as the editor
+
+If you *do* have an `ANTHROPIC_API_KEY`, Claude (default `claude-opus-4-8`) takes
+over the editorial decisions — reading the scene table and transcript like a human
+editor, picking quotable dialogue, and writing interstitial title cards. Everything
+it returns is schema-validated and clamped against the real video before rendering.
+Without a key, the pro editor above runs automatically. There is no functional
+difference in the render pipeline.
 
 ## Install
 
@@ -40,9 +54,7 @@ button shot.
 sudo apt install ffmpeg        # or: brew install ffmpeg
 
 pip install -e .               # core
-pip install -e ".[transcribe]" # + speech-to-text (recommended)
-
-export ANTHROPIC_API_KEY=sk-ant-...   # enables the AI editor
+pip install -e ".[transcribe]" # + local speech-to-text (recommended, still offline)
 ```
 
 ## Usage
@@ -51,7 +63,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # enables the AI editor
 # The one-liner: 60-second epic trailer
 trailer-agent make my_video.mp4 -o trailer.mp4 --title "THE LAST RUN"
 
-# Full control
+# The full experience: beat-synced to your music, with sound design
 trailer-agent make my_video.mp4 -o trailer.mp4 \
     --duration 75 \
     --style action \
@@ -59,14 +71,11 @@ trailer-agent make my_video.mp4 -o trailer.mp4 \
     --tagline "One shot. No second chances." \
     --music epic_track.mp3
 
-# No API key / offline: heuristic editor
-trailer-agent make my_video.mp4 --no-ai --title "MY FILM"
-
 # Inspect before you render
-trailer-agent analyze my_video.mp4            # scene/energy table as JSON
+trailer-agent analyze my_video.mp4            # scene/energy/motion table as JSON
 trailer-agent plan my_video.mp4 -o plan.json  # editorial plan as JSON
 # ...edit plan.json by hand if you like...
-trailer-agent render my_video.mp4 --plan plan.json -o trailer.mp4
+trailer-agent render my_video.mp4 --plan plan.json --music epic_track.mp3 -o trailer.mp4
 ```
 
 `python -m trailer_agent ...` works too if you haven't installed the entry point.
@@ -86,11 +95,24 @@ trailer-agent render my_video.mp4 --plan plan.json -o trailer.mp4
 |---------------------|-------------------|-------------------------------------------|
 | `--duration`        | `60`              | Target trailer length (seconds)           |
 | `--style`           | `epic`            | Visual + pacing style                     |
-| `--music PATH`      | –                 | Music bed, auto-ducked under dialogue     |
-| `--no-ai`           | off               | Use the heuristic editor (no API calls)   |
-| `--model`           | `claude-opus-4-8` | Claude model for editorial planning       |
+| `--music PATH`      | –                 | Music bed: beat-synced cuts + auto-ducking |
+| `--no-sfx`          | off               | Disable the riser + hit into the title    |
+| `--no-ai`           | off               | Force the pro editor even with a key set  |
+| `--model`           | `claude-opus-4-8` | Claude model when a key is available      |
 | `--scene-threshold` | `0.27`            | Lower = more cuts detected                |
 | `--height`          | `1080`            | Output resolution height                  |
+
+## How the analysis works
+
+Everything comes from **two ffmpeg decode passes**, no matter how long the video:
+
+1. **Video pass** (downscaled): scene-change scores → cut list; `signalstats`
+   frame-difference → motion curve; 1 fps 8×8 grayscale stream → visual fingerprints.
+2. **Audio pass**: half-second RMS windows → excitement curve; `silencedetect` →
+   speech regions.
+
+If [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) is installed, a
+third (optional, still local) pass transcribes dialogue so scenes carry quotable text.
 
 ## Development
 
@@ -99,15 +121,6 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite covers ffmpeg-output parsing, plan validation, the heuristic
-editor, and renderer helpers — no ffmpeg binary or API key needed to run it.
-
-## Notes
-
-- The Claude editor uses [structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs),
-  so the plan always validates against the `TrailerPlan` schema; timestamps are
-  additionally clamped against the real video duration before rendering.
-- Every plan is renderable offline: `plan` → tweak JSON → `render` is a fully
-  reproducible pipeline.
-- Long inputs are fine — analysis streams through ffmpeg without loading video
-  into memory.
+The test suite (38 tests) covers ffmpeg-output parsing, beat detection, plan
+validation, speech-safe snapping, fingerprint dedupe, the pro editor's act
+structure, and renderer helpers — no ffmpeg binary or API key needed to run it.

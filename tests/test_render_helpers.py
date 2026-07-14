@@ -2,6 +2,7 @@
 
 from trailer_agent.config import STYLES, TrailerOptions
 from trailer_agent.render import _letterbox_filter, _shot_filters, atempo_chain, drawtext_escape
+from trailer_agent.storyboard import TimelineItem
 
 
 def test_atempo_chain_in_range():
@@ -33,7 +34,15 @@ def test_letterbox_filter_bar_math():
 
 def test_shot_filters_include_style_grade_and_speed():
     opts = TrailerOptions(style=STYLES["action"])
-    vf = _shot_filters(opts, speed=2.0)
+    item = TimelineItem(kind="shot", start=0.0, end=4.0, speed=2.0)
+    vf = _shot_filters(opts, item)
     assert "setpts=PTS/2" in vf
     assert "eq=contrast=1.12" in vf
     assert vf.endswith("format=yuv420p")
+
+
+def test_shot_filters_include_fades():
+    opts = TrailerOptions(style=STYLES["epic"])
+    item = TimelineItem(kind="shot", start=0.0, end=4.0, fade_out=0.5)
+    vf = _shot_filters(opts, item)
+    assert "fade=t=out:st=3.500:d=0.500" in vf

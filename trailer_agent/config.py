@@ -66,3 +66,5 @@ class TrailerOptions:
     model: str = DEFAULT_MODEL
     output_height: int = 1080
     keep_temp: bool = False
+    sfx: bool = True           # synthesized riser + hit into the title card
+    music_offset: float = 0.0  # trim the music start so it begins on a beat
