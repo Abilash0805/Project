@@ -82,9 +82,13 @@ def _letterbox_filter(width: int, height: int) -> str:
 def _shot_filters(opts: TrailerOptions, item: TimelineItem) -> str:
     width, height = _frame_size(opts)
     out_dur = item.output_duration()
+    # Fill the frame edge-to-edge (cover), cropping overflow — NOT pad-to-fit,
+    # which leaves black borders around odd-aspect sources (a 2:1 phone-review
+    # clip padded into 16:9 looks broken). Cover framing is what makes it read
+    # as professionally composed on any input aspect ratio.
     parts = [
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
         f"fps={FPS}",
     ]
     if item.speed != 1.0:

@@ -12,7 +12,10 @@ class Style:
     name: str
     description: str          # given to the editorial brain
     grade: str                # ffmpeg video filter fragment for the look
-    letterbox: bool = True    # crop to 2.39:1 cinematic bars
+    # 2.39:1 cinematic bars. Off by default: the footage now fills the frame
+    # (cover), so full-bleed 16:9 reads cleaner than bars over an already-wide
+    # source. Enable per-run with --cinemascope for a 16:9 source that wants it.
+    letterbox: bool = False
     card_font_size: int = 72
     card_fade: float = 0.4
 

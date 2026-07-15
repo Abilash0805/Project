@@ -7,6 +7,8 @@ import json
 import logging
 import sys
 
+import dataclasses
+
 from .analysis import analyze
 from .brain import make_plan
 from .config import DEFAULT_MODEL, STYLES, TrailerOptions
@@ -16,9 +18,12 @@ from .storyboard import TrailerPlan, validate_plan
 
 
 def _build_options(args: argparse.Namespace) -> TrailerOptions:
+    style = STYLES[args.style]
+    if getattr(args, "cinemascope", False):
+        style = dataclasses.replace(style, letterbox=True)
     return TrailerOptions(
         target_duration=args.duration,
-        style=STYLES[args.style],
+        style=style,
         title=args.title,
         tagline=args.tagline,
         music=args.music,
@@ -61,6 +66,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--keep-temp", action="store_true", help="Keep intermediate segment files")
     p.add_argument("--no-sfx", action="store_true",
                    help="Disable the synthesized riser + hit into the title card")
+    p.add_argument("--cinemascope", action="store_true",
+                   help="Add 2.39:1 cinematic bars (best for 16:9 source footage)")
 
 
 def main(argv: list[str] | None = None) -> int:

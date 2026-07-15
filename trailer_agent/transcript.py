@@ -39,20 +39,22 @@ def transcribe(path: str, *, model_size: str = "base") -> list[SpeechSegment] | 
         # GPU toolkit. int8 on CPU is plenty fast for the base model, and keeps
         # the dialogue features working fully offline everywhere.
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        segments, _info = model.transcribe(path, vad_filter=True, word_timestamps=True)
-        return [
-            SpeechSegment(
-                start=s.start,
-                end=s.end,
-                text=s.text.strip(),
-                words=[
-                    Word(start=w.start, end=w.end, text=w.word.strip())
-                    for w in (s.words or [])
-                ],
-            )
-            for s in segments
-            if s.text.strip()
-        ]
+        # No word_timestamps: it runs a slow extra alignment pass per segment
+        # (the cause of multi-minute stalls on CPU) and we only use segment-level
+        # timing. VAD trims silence so we don't transcribe dead air.
+        segments, info = model.transcribe(path, vad_filter=True)
+        log.info("Transcribing %s speech (lang=%s)... this can take a few minutes "
+                 "on CPU; pass --no-transcript to skip.",
+                 "detected" if info else "", getattr(info, "language", "?"))
+        out: list[SpeechSegment] = []
+        for s in segments:  # generator — work happens as we iterate
+            text = s.text.strip()
+            if text:
+                out.append(SpeechSegment(start=s.start, end=s.end, text=text))
+            if len(out) % 25 == 0 and out:
+                log.info("  ...transcribed %d lines (%.0fs in)", len(out), s.end)
+        log.info("Transcription done: %d lines", len(out))
+        return out
     except Exception as exc:  # transcription is best-effort; never fail the pipeline
         log.warning("Transcription failed (%s); continuing without it", exc)
         return None
