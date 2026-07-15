@@ -28,14 +28,26 @@ def _find(binary: str) -> str:
 _TEXT_KWARGS = {"encoding": "utf-8", "errors": "replace"}
 
 
-def run_ffmpeg(args: list[str], *, capture: bool = False, timeout: int | None = None) -> str:
-    """Run ffmpeg with -hide_banner -y and the given args. Returns stderr+stdout text."""
+def run_ffmpeg(
+    args: list[str],
+    *,
+    capture: bool = False,
+    timeout: int | None = None,
+    cwd: str | None = None,
+) -> str:
+    """Run ffmpeg with -hide_banner -y and the given args. Returns stderr+stdout text.
+
+    `cwd` runs ffmpeg from that directory — used so filter-graph outputs can be
+    referenced by bare filename, avoiding Windows path characters (drive-letter
+    ':' and '\\') that ffmpeg's filter parser would otherwise misinterpret.
+    """
     cmd = [_find("ffmpeg"), "-hide_banner", "-y", *args]
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if not capture else subprocess.PIPE,
         timeout=timeout,
+        cwd=cwd,
         **_TEXT_KWARGS,
     )
     if proc.returncode != 0:

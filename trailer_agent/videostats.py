@@ -75,27 +75,35 @@ class VideoStats:
 
 def analyze_video(path: str, *, scene_threshold: float = 0.27) -> VideoStats:
     workdir = tempfile.mkdtemp(prefix="trailer_vstats_")
-    cuts_file = os.path.join(workdir, "cuts.txt")
-    motion_file = os.path.join(workdir, "motion.txt")
-    sigs_file = os.path.join(workdir, "sigs.gray")
+    # ffmpeg's filter graph treats ':' and '\' as syntax, so an absolute path
+    # like C:\Users\...\cuts.txt inside metadata=print:file=... corrupts the
+    # graph on Windows. Reference the outputs by BARE filename and run ffmpeg
+    # from `workdir` (cwd) so those names resolve there — no path chars in the
+    # graph at all. `path` (the -i input) is a normal arg and is unaffected.
+    cuts_name, motion_name, sigs_name = "cuts.txt", "motion.txt", "sigs.gray"
+    cuts_file = os.path.join(workdir, cuts_name)
+    motion_file = os.path.join(workdir, motion_name)
+    sigs_file = os.path.join(workdir, sigs_name)
+    source = os.path.abspath(path)  # keep the input resolvable after cwd change
     try:
         run_ffmpeg(
             [
-                "-i", path,
+                "-i", source,
                 "-filter_complex",
                 (
                     "[0:v]scale=320:-2:flags=fast_bilinear,split=3[sc][mo][sg];"
                     f"[sc]select='gt(scene,{scene_threshold})',"
-                    f"metadata=print:file={cuts_file}[v1];"
+                    f"metadata=print:file={cuts_name}[v1];"
                     f"[mo]fps={MOTION_FPS},signalstats,"
-                    f"metadata=print:key=lavfi.signalstats.YDIF:file={motion_file}[v2];"
+                    f"metadata=print:key=lavfi.signalstats.YDIF:file={motion_name}[v2];"
                     f"[sg]fps=1,scale={SIG_SIZE}:{SIG_SIZE},format=gray[v3]"
                 ),
                 "-map", "[v1]", "-f", "null", os.devnull,
                 "-map", "[v2]", "-f", "null", os.devnull,
-                "-map", "[v3]", "-f", "rawvideo", sigs_file,
+                "-map", "[v3]", "-f", "rawvideo", sigs_name,
             ],
             timeout=3600,
+            cwd=workdir,
         )
         with open(cuts_file, encoding="utf-8", errors="replace") as f:
             cuts = parse_scene_output(f.read())

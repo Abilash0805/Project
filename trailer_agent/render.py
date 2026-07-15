@@ -48,6 +48,17 @@ def drawtext_escape(text: str) -> str:
     return out
 
 
+def escape_filter_path(path: str) -> str:
+    """Escape a filesystem path for use as a filter-graph option value.
+
+    ffmpeg's filter parser treats '\\' and ':' as syntax, so a Windows font
+    path like C:\\Windows\\Fonts\\arial.ttf breaks drawtext. ffmpeg accepts
+    forward slashes on Windows, so normalize to '/' and escape the drive colon.
+    On POSIX paths (no backslash, no colon) this is a no-op.
+    """
+    return path.replace("\\", "/").replace(":", "\\:")
+
+
 def atempo_chain(speed: float) -> str:
     """Build an atempo filter chain; each stage must stay within [0.5, 2.0]."""
     stages: list[float] = []
@@ -156,7 +167,7 @@ def render_card_segment(item: TimelineItem, opts: TrailerOptions, out_path: str)
         fade = min(opts.style.card_fade, duration / 3)
         text = drawtext_escape(item.text)
         font = find_font()
-        fontfile = f"fontfile={font}:" if font else ""
+        fontfile = f"fontfile={escape_filter_path(font)}:" if font else ""
         filters.append(
             f"drawtext={fontfile}text='{text}':fontcolor=white:"
             f"fontsize={opts.style.card_font_size}:x=(w-text_w)/2:y=(h-text_h)/2"
@@ -308,10 +319,12 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
         raise RuntimeError("Trailer plan is empty; nothing to render")
 
     workdir = tempfile.mkdtemp(prefix="trailer_agent_")
+    source = os.path.abspath(info.path)  # resolvable regardless of cwd
     try:
         segments: list[str] = []
         for i, item in enumerate(plan.timeline):
-            seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
+            seg_name = f"seg_{i:03d}.mp4"
+            seg_path = os.path.join(workdir, seg_name)
             if item.kind in ("title", "black"):
                 log.info("Rendering %s card %d: %r", item.kind, i, item.text or "")
                 render_card_segment(item, opts, seg_path)
@@ -320,9 +333,12 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
                     "Rendering shot %d: %.2f-%.2fs x%.2g (%s)",
                     i, item.start, item.end, item.speed, item.note or "-",
                 )
-                render_shot_segment(item, info.path, info.has_audio, opts, seg_path)
-            segments.append(seg_path)
+                render_shot_segment(item, source, info.has_audio, opts, seg_path)
+            segments.append(seg_name)
 
+        # The concat demuxer treats '\' as an escape character, so absolute
+        # Windows paths (C:\...\seg.mp4) get corrupted. List the segments by
+        # bare filename and run concat from `workdir` (cwd) so they resolve.
         concat_list = os.path.join(workdir, "concat.txt")
         with open(concat_list, "w", encoding="utf-8") as f:
             for seg in segments:
@@ -330,8 +346,9 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
 
         assembled = os.path.join(workdir, "assembled.mp4")
         run_ffmpeg(
-            ["-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", assembled],
+            ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "assembled.mp4"],
             timeout=600,
+            cwd=workdir,
         )
 
         log.info("Final pass: music, sound design, loudness")
