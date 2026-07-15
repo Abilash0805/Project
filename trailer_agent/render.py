@@ -48,17 +48,6 @@ def drawtext_escape(text: str) -> str:
     return out
 
 
-def escape_filter_path(path: str) -> str:
-    """Escape a filesystem path for use as a filter-graph option value.
-
-    ffmpeg's filter parser treats '\\' and ':' as syntax, so a Windows font
-    path like C:\\Windows\\Fonts\\arial.ttf breaks drawtext. ffmpeg accepts
-    forward slashes on Windows, so normalize to '/' and escape the drive colon.
-    On POSIX paths (no backslash, no colon) this is a no-op.
-    """
-    return path.replace("\\", "/").replace(":", "\\:")
-
-
 def atempo_chain(speed: float) -> str:
     """Build an atempo filter chain; each stage must stay within [0.5, 2.0]."""
     stages: list[float] = []
@@ -158,16 +147,26 @@ def render_shot_segment(
     run_ffmpeg(args, timeout=1800)
 
 
-def render_card_segment(item: TimelineItem, opts: TrailerOptions, out_path: str) -> None:
-    """A title card, or a bare dip-to-black when the item has no text."""
+def render_card_segment(
+    item: TimelineItem,
+    opts: TrailerOptions,
+    out_path: str,
+    workdir: str,
+    font_name: str | None,
+) -> None:
+    """A title card, or a bare dip-to-black when the item has no text.
+
+    `font_name` is a bare filename inside `workdir` (the font is copied there by
+    render() so drawtext never sees a Windows drive-letter path in the graph).
+    ffmpeg runs with cwd=workdir so the bare name resolves.
+    """
     width, height = _frame_size(opts)
     duration = item.duration or 2.0
     filters: list[str] = []
     if item.kind == "title" and item.text:
         fade = min(opts.style.card_fade, duration / 3)
         text = drawtext_escape(item.text)
-        font = find_font()
-        fontfile = f"fontfile={escape_filter_path(font)}:" if font else ""
+        fontfile = f"fontfile={font_name}:" if font_name else ""
         filters.append(
             f"drawtext={fontfile}text='{text}':fontcolor=white:"
             f"fontsize={opts.style.card_font_size}:x=(w-text_w)/2:y=(h-text_h)/2"
@@ -188,6 +187,7 @@ def render_card_segment(item: TimelineItem, opts: TrailerOptions, out_path: str)
             out_path,
         ],
         timeout=600,
+        cwd=workdir,
     )
 
 
@@ -320,6 +320,20 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
 
     workdir = tempfile.mkdtemp(prefix="trailer_agent_")
     source = os.path.abspath(info.path)  # resolvable regardless of cwd
+
+    # Copy the title font into the workdir so drawtext can reference it by a
+    # bare filename. A Windows font path (C:\Windows\Fonts\arial.ttf) inside a
+    # drawtext filter breaks ffmpeg's parser no matter how it's escaped; a bare
+    # name run with cwd=workdir sidesteps the problem entirely.
+    font_name: str | None = None
+    src_font = find_font()
+    if src_font:
+        try:
+            font_name = "titlefont" + os.path.splitext(src_font)[1].lower()
+            shutil.copyfile(src_font, os.path.join(workdir, font_name))
+        except OSError:
+            font_name = None  # cards still render, just without a custom font
+
     try:
         segments: list[str] = []
         for i, item in enumerate(plan.timeline):
@@ -327,7 +341,7 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
             seg_path = os.path.join(workdir, seg_name)
             if item.kind in ("title", "black"):
                 log.info("Rendering %s card %d: %r", item.kind, i, item.text or "")
-                render_card_segment(item, opts, seg_path)
+                render_card_segment(item, opts, seg_path, workdir, font_name)
             else:
                 log.info(
                     "Rendering shot %d: %.2f-%.2fs x%.2g (%s)",

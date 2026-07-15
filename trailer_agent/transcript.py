@@ -34,7 +34,11 @@ def transcribe(path: str, *, model_size: str = "base") -> list[SpeechSegment] | 
         return None
 
     try:
-        model = WhisperModel(model_size, compute_type="int8")
+        # Force CPU: the default auto-detect tries to load CUDA/cuBLAS
+        # (cublas64_*.dll), which fails on the many machines without an NVIDIA
+        # GPU toolkit. int8 on CPU is plenty fast for the base model, and keeps
+        # the dialogue features working fully offline everywhere.
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
         segments, _info = model.transcribe(path, vad_filter=True, word_timestamps=True)
         return [
             SpeechSegment(
