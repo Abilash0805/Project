@@ -97,9 +97,9 @@ def analyze_video(path: str, *, scene_threshold: float = 0.27) -> VideoStats:
             ],
             timeout=3600,
         )
-        with open(cuts_file) as f:
+        with open(cuts_file, encoding="utf-8", errors="replace") as f:
             cuts = parse_scene_output(f.read())
-        with open(motion_file) as f:
+        with open(motion_file, encoding="utf-8", errors="replace") as f:
             motion = EnergyCurve(parse_motion_output(f.read()))
         with open(sigs_file, "rb") as f:
             fingerprints = Fingerprints(f.read())

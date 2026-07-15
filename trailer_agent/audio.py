@@ -11,7 +11,7 @@ import subprocess
 from bisect import bisect_right
 from dataclasses import dataclass
 
-from .ffmpeg import FFmpegError, _find
+from .ffmpeg import FFmpegError, _TEXT_KWARGS, _find
 
 _FRAME_RE = re.compile(r"pts_time:(?P<t>[0-9.]+)")
 _RMS_RE = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(?P<db>-?[0-9.]+|-inf|inf|nan)")
@@ -145,7 +145,7 @@ def analyze_audio(
         "-f", "null", "-",
     ]
     proc = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1800
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800, **_TEXT_KWARGS
     )
     if proc.returncode != 0:
         raise FFmpegError(f"audio analysis failed ({proc.returncode}):\n{proc.stderr[-4000:]}")

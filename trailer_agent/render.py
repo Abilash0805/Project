@@ -324,7 +324,7 @@ def render(plan: TrailerPlan, info: MediaInfo, opts: TrailerOptions, output: str
             segments.append(seg_path)
 
         concat_list = os.path.join(workdir, "concat.txt")
-        with open(concat_list, "w") as f:
+        with open(concat_list, "w", encoding="utf-8") as f:
             for seg in segments:
                 f.write(f"file '{seg}'\n")
 

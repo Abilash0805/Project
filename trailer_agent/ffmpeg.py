@@ -20,6 +20,14 @@ def _find(binary: str) -> str:
     return path
 
 
+# ffmpeg/ffprobe always emit UTF-8, but Python's text-mode subprocess decodes
+# with locale.getpreferredencoding() by default — on Windows that's usually a
+# legacy codepage (e.g. cp1252), which crashes on any non-ASCII byte (accented
+# filenames, unicode metadata, non-Latin scripts). Force UTF-8 explicitly and
+# never let a decode error crash the pipeline over log/metadata text.
+_TEXT_KWARGS = {"encoding": "utf-8", "errors": "replace"}
+
+
 def run_ffmpeg(args: list[str], *, capture: bool = False, timeout: int | None = None) -> str:
     """Run ffmpeg with -hide_banner -y and the given args. Returns stderr+stdout text."""
     cmd = [_find("ffmpeg"), "-hide_banner", "-y", *args]
@@ -27,8 +35,8 @@ def run_ffmpeg(args: list[str], *, capture: bool = False, timeout: int | None = 
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if not capture else subprocess.PIPE,
-        text=True,
         timeout=timeout,
+        **_TEXT_KWARGS,
     )
     if proc.returncode != 0:
         output = (proc.stdout or "") + (proc.stderr or "")
@@ -41,7 +49,7 @@ def run_ffmpeg(args: list[str], *, capture: bool = False, timeout: int | None = 
 def run_ffprobe(args: list[str], *, timeout: int | None = 120) -> str:
     cmd = [_find("ffprobe"), "-hide_banner", *args]
     proc = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **_TEXT_KWARGS
     )
     if proc.returncode != 0:
         raise FFmpegError(f"ffprobe failed ({proc.returncode}):\n{proc.stderr[-4000:]}")

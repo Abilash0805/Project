@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = make_plan(result, opts, grid=_music_grid(opts))
         payload = plan.model_dump_json(indent=2)
         if args.output:
-            with open(args.output, "w") as f:
+            with open(args.output, "w", encoding="utf-8") as f:
                 f.write(payload)
             log.info("Plan written to %s (%.1fs total)", args.output, plan.total_duration())
         else:
@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
 
         info = probe(args.input)
         _music_grid(opts)  # sets opts.music_offset for beat-aligned music start
-        with open(args.plan) as f:
+        with open(args.plan, encoding="utf-8") as f:
             plan = TrailerPlan.model_validate(json.load(f))
         plan = validate_plan(plan, info.duration, opts.target_duration)
         out = render(plan, info, opts, args.output)
